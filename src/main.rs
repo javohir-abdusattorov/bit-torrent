@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use serde_bencode;
 use hashes::Hashes;
 use clap::{Parser, Subcommand};
+use sha1::{Sha1, Digest};
 
 
 #[derive(Parser, Debug)]
@@ -85,7 +86,7 @@ struct File {
 
 fn main() -> anyhow::Result<()> {
     match Args::parse().command {
-        Commands::Decode { value } => {
+        Commands::Decode { value: _value } => {
             // let decoded: serde_json::Value = serde_bencode::from_str(&value)?;
             unimplemented!("serde_bencode -> serde_json::Value doesn't work")
         }
@@ -98,18 +99,25 @@ fn main() -> anyhow::Result<()> {
             if let Keys::SingleFile { length } = torrent.info.keys {
                 println!("Length: {}", length);
             }
+
+            let info_encoded = serde_bencode::to_bytes(&torrent.info).context("encode info secion")?;
+            let mut info_hasher = Sha1::new();
+            info_hasher.update(&info_encoded);
+            let info_hash = info_hasher.finalize();
+            println!("Info hash: {}", hex::encode(&info_hash));
         }
     }
 
     Ok(())
 }
 
+
 mod hashes {
     use core::fmt;
 
-    use serde::{de::{self, Visitor}, Deserialize, Deserializer, Serialize};
+    use serde::{de::{self, Visitor}, Deserialize, Deserializer, Serialize, Serializer};
 
-    #[derive(Debug, Clone, Serialize)]
+    #[derive(Debug, Clone)]
     pub struct Hashes(Vec<[u8; 20]>);
     struct HashesVisitor;
     
@@ -143,4 +151,15 @@ mod hashes {
             deserializer.deserialize_bytes(HashesVisitor)
         }
     }
+
+    impl Serialize for Hashes {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let slice = self.0.concat();
+            serializer.serialize_bytes(&slice)
+        }
+    }
+
 }
