@@ -1,10 +1,8 @@
+use bittorrent::torrent::*;
+use bittorrent::tracker::*;
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use serde_bencode;
-use hashes::Hashes;
 use clap::{Parser, Subcommand};
-use sha1::{Sha1, Digest};
 
 
 #[derive(Parser, Debug)]
@@ -22,65 +20,11 @@ enum Commands {
 
     Info {
         torrent: PathBuf
-    }
-}
-
-/// A Metainfo files(also known as .torrent files)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Torrent {
-    /// The URL of the tracker
-    announce: String,
-
-    info: Info,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Info {
-    /// The suggested name to save the file (or directory) as. It is purely advisory
-    /// 
-    /// In the single file case, the name key is the name of a file, in the muliple file case, it's the name of a directory
-    name: String,
-
-    /// Number of bytes in each piece the file is split into.
-    /// 
-    /// For the purposes of transfer, files are split into fixed-size pieces which are all the same 
-    /// length except for possibly the last one which may be truncated
-    #[serde(rename = "piece length")]
-    piece_length: usize,
-
-    /// Each entry of pieces is the SHA1 hash of piece at corresponding index
-    pieces: Hashes,
-
-    
-    #[serde(flatten)]
-    keys: Keys,
-}
-
-/// There is also a key `length` or a key `files`, but not both or neither. 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-enum Keys {
-    /// If `length` is present then the download represents a single file,
-    SingleFile {
-        /// Length of the file in bytes
-        length: usize
     },
 
-    /// It represents a set of files which go in a directory structure.
-    /// For the purposes of the other keys in `Info`, the multi-file case is treated as only 
-    /// having a single file by concatenating the files in the order they appear in the files list. 
-    MultiFile {
-        files: Vec<File>
+    Peers {
+        torrent: PathBuf
     },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct File {
-    /// The length of the file, in bytes
-    length: usize,
-
-    /// List of UTF-8 encoded strings corresponding to subdirectory names, the last of which is the actual file name
-    path: Vec<String>
 }
 
 
@@ -92,74 +36,53 @@ fn main() -> anyhow::Result<()> {
         }
 
         Commands::Info { torrent } => {
-            let file = std::fs::read(torrent).context("read torrent file")?;
-            let torrent: Torrent = serde_bencode::from_bytes(&file).context("parse torrent file")?;
-
+            let torrent = Torrent::try_from(torrent)?;
             println!("Tracker URL: {}", torrent.announce);
-            if let Keys::SingleFile { length } = torrent.info.keys {
-                println!("Length: {}", length);
-            }
+            println!("Length: {}", torrent.file_length());
 
-            let info_encoded = serde_bencode::to_bytes(&torrent.info).context("encode info secion")?;
-            let mut info_hasher = Sha1::new();
-            info_hasher.update(&info_encoded);
-            let info_hash = info_hasher.finalize();
-            println!("Info hash: {}", hex::encode(&info_hash));
-        }
+            let (_, info_hash_hex) = torrent.info_hash()?;
+            let piece_hashes = torrent.info.pieces.0
+                .iter()
+                .map(|sha1| format!("\n{}", hex::encode(&sha1)))
+                .collect::<String>();
+
+            println!("Info hash: {}", info_hash_hex);
+            println!("Piece length: {}", torrent.info.piece_length);
+            println!("Piece Hashes: {}", piece_hashes);
+
+        },
+
+        Commands::Peers { torrent } => {
+            let torrent = Torrent::try_from(torrent)?;
+            let file_length = torrent.file_length();
+
+            let (info_hash_bytes, _) = torrent.info_hash()?;
+
+            let request = TrackerRequest {
+                info_hash: info_hash_bytes,
+                peer_id: String::from("11111111111111111111"),
+                port: 6881,
+                uploaded: 0,
+                downloaded: 0,
+                left: file_length,
+                compact: 1,
+            };
+
+            let tracker_url = request.url_params(&torrent.announce)?;
+
+            let response = reqwest::blocking::
+                get(tracker_url)
+                .context("initiate GET request to tracker")?
+                .bytes()
+                .context("fetch tracker response")
+                .map(|bytes| serde_bencode::from_bytes::<TrackerResponse>(&bytes))?
+                .context("bencode tracker response")?;
+
+            for peer in &response.peers.0 {
+                println!("{peer}");
+            }
+        },
     }
 
     Ok(())
-}
-
-
-mod hashes {
-    use core::fmt;
-
-    use serde::{de::{self, Visitor}, Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Debug, Clone)]
-    pub struct Hashes(Vec<[u8; 20]>);
-    struct HashesVisitor;
-    
-    impl<'de> Visitor<'de> for HashesVisitor {
-        type Value = Hashes;
-    
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a byte string whose length is a multiple of 20")
-        }
-    
-        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            if v.len() % 20 != 0 {
-                return Err(E::custom(format!("length is {}", v.len())));
-            }
-    
-            Ok(Hashes(v
-                .chunks_exact(20)
-                .map(|slice| slice.try_into().expect("guaranteed to be length 20"))
-                .collect()))
-        }
-    }
-    
-    impl<'de> Deserialize<'de> for Hashes {
-        fn deserialize<D>(deserializer: D) -> Result<Hashes, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            deserializer.deserialize_bytes(HashesVisitor)
-        }
-    }
-
-    impl Serialize for Hashes {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let slice = self.0.concat();
-            serializer.serialize_bytes(&slice)
-        }
-    }
-
 }
