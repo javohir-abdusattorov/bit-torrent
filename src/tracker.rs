@@ -38,7 +38,6 @@ impl TrackerRequest {
         tracker_url.set_query(Some(&url_params));
 
         let tracker_url = format!("{}&info_hash={}", tracker_url, &urlencode(&self.info_hash));
-        println!("tracker_url: {tracker_url:?}");
         Ok(tracker_url)
     }
 }
@@ -60,7 +59,6 @@ fn urlencode(t: &[u8; 20]) -> String {
         encoded.push_str(&hex::encode([byte]));
     }
 
-    println!("encoded: {encoded}");
     encoded
 }
 

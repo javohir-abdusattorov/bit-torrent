@@ -1,10 +1,9 @@
 use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha1::{Sha1, Digest};
 pub use hashes::Hashes;
-
+use crate::tracker::{TrackerRequest, TrackerResponse};
 
 /// A Metainfo files(also known as .torrent files)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +31,38 @@ impl Torrent {
             Keys::SingleFile { length } => *length,
             Keys::MultiFile { files: _ } => 0,
         }
+    }
+
+    pub fn tracker_request(&self) -> Result<TrackerRequest> {
+        let (info_hash_bytes, _) = self.info_hash()?;
+        let file_length = self.file_length();
+
+        Ok(TrackerRequest {
+            info_hash: info_hash_bytes,
+            peer_id: String::from("11111111111111111112"),
+            port: 6881,
+            uploaded: 0,
+            downloaded: 0,
+            left: file_length,
+            compact: 1,
+        })
+    }
+
+    pub async fn tracker_info(&self) -> Result<TrackerResponse> {
+        let request = self.tracker_request()?;
+
+        let tracker_url = request.url_params(&self.announce)?;
+        let tracker_info = reqwest::
+            get(tracker_url)
+            .await
+            .context("initiate GET request to tracker")?
+            .bytes()
+            .await
+            .context("fetch tracker response")
+            .map(|bytes| serde_bencode::from_bytes::<TrackerResponse>(&bytes))?
+            .context("bencode tracker response")?;
+
+        Ok(tracker_info)
     }
 }
 
