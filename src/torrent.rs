@@ -5,6 +5,7 @@ use sha1::{Sha1, Digest};
 pub use hashes::Hashes;
 use crate::tracker::{TrackerRequest, TrackerResponse};
 
+
 /// A Metainfo files(also known as .torrent files)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Torrent {
@@ -15,15 +16,18 @@ pub struct Torrent {
 }
 
 impl Torrent {
-    pub fn info_hash(&self) -> Result<([u8; 20], String)> {
+    pub fn peer_id(&self) -> [u8; 20] {
+        *b"12345611111111111112"
+    }
+
+    pub fn info_hash(&self) -> Result<[u8; 20]> {
         let encoded = serde_bencode::to_bytes(&self.info).context("encode info secion")?;
         let mut hasher = Sha1::new();
         hasher.update(&encoded);
         let bytes = hasher.finalize();
         let array = bytes[..].try_into().expect("GenericArray<_, 20> == [_; 20]");
-        let hex = hex::encode(&bytes);
 
-        Ok((array, hex))
+        Ok(array)
     }
 
     pub fn file_length(&self) -> usize {
@@ -31,21 +35,6 @@ impl Torrent {
             Keys::SingleFile { length } => *length,
             Keys::MultiFile { files: _ } => 0,
         }
-    }
-
-    pub fn tracker_request(&self) -> Result<TrackerRequest> {
-        let (info_hash_bytes, _) = self.info_hash()?;
-        let file_length = self.file_length();
-
-        Ok(TrackerRequest {
-            info_hash: info_hash_bytes,
-            peer_id: String::from("11111111111111111112"),
-            port: 6881,
-            uploaded: 0,
-            downloaded: 0,
-            left: file_length,
-            compact: 1,
-        })
     }
 
     pub async fn tracker_info(&self) -> Result<TrackerResponse> {
@@ -63,6 +52,21 @@ impl Torrent {
             .context("bencode tracker response")?;
 
         Ok(tracker_info)
+    }
+
+    fn tracker_request(&self) -> Result<TrackerRequest> {
+        let info_hash_bytes = self.info_hash()?;
+        let file_length = self.file_length();
+
+        Ok(TrackerRequest {
+            info_hash: info_hash_bytes,
+            peer_id: String::from_utf8(self.peer_id().to_vec())?,
+            port: 6881,
+            uploaded: 0,
+            downloaded: 0,
+            left: file_length,
+            compact: 1,
+        })
     }
 }
 

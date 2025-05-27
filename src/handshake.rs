@@ -1,3 +1,7 @@
+use anyhow::{Context, Result};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
+use crate::torrent::Torrent;
+
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -10,18 +14,33 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    pub fn new(info_hash: [u8; 20], peer_id: [u8; 20]) -> Self {
-        Self {
+    pub fn new(torrent: &Torrent) -> Result<Self> {
+        Ok(Self {
             length: 19,
             bittorrent: *b"BitTorrent protocol",
             reserved: [0; 8],
-            info_hash,
-            peer_id,
-        }
+            info_hash: torrent.info_hash()?,
+            peer_id: torrent.peer_id(),
+        })
     }
 
-    /// Safety: Handshake is a POD with rep(C)
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+    pub async fn establish(mut self, socket: &mut TcpStream) -> Result<Self> {
+        let handshake_bytes = self.as_bytes_mut();
+
+        socket
+            .write_all(handshake_bytes)
+            .await
+            .context("write handshake to socket")?;
+
+        socket
+            .read_exact(handshake_bytes)
+            .await
+            .context("read handshake from socket")?;
+
+        Ok(self)
+    }
+
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
         let bytes = self as *mut Self as *mut [u8; std::mem::size_of::<Self>()];
         let bytes: &mut [u8; std::mem::size_of::<Self>()] = unsafe { &mut *bytes };
         bytes
