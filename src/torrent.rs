@@ -2,8 +2,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha1::{Sha1, Digest};
-pub use hashes::Hashes;
-use crate::tracker::{TrackerRequest, TrackerResponse};
+use crate::{piece::PieceChunked, tracker::{TrackerRequest, TrackerResponse}};
 
 
 /// A Metainfo files(also known as .torrent files)
@@ -18,6 +17,11 @@ pub struct Torrent {
 impl Torrent {
     pub fn peer_id(&self) -> [u8; 20] {
         *b"12345611111111111112"
+    }
+
+    pub fn output_file(&self) -> Result<std::fs::File, std::io::Error> {
+        let name = format!("./downloads/{}", self.info.name);
+        std::fs::File::create(name)
     }
 
     pub fn info_hash(&self) -> Result<[u8; 20]> {
@@ -68,6 +72,29 @@ impl Torrent {
             compact: 1,
         })
     }
+
+    pub fn pieces_chunked(&self) -> impl Iterator<Item = PieceChunked> + use<'_> {
+        self.info.pieces.0
+            .iter()
+            .enumerate()
+            .map(|(index, hash)| {
+                let last = index == self.info.pieces.0.len() - 1;
+                let piece_length = self.info.piece_length;
+                let file_length = self.file_length();
+
+                let piece_size = if last {
+                    file_length - (index * piece_length)
+                } else {
+                    piece_length
+                };
+
+                PieceChunked::new(
+                    index,
+                    *hash,
+                    piece_size,
+                )
+            })
+    }
 }
 
 impl TryFrom<PathBuf> for Torrent {
@@ -94,7 +121,7 @@ pub struct Info {
     pub piece_length: usize,
 
     /// Each entry of pieces is the SHA1 hash of piece at corresponding index
-    pub pieces: Hashes,
+    pub pieces: PieceHashes,
 
     #[serde(flatten)]
     pub keys: Keys,
@@ -127,21 +154,23 @@ pub struct File {
     path: Vec<String>
 }
 
-pub mod hashes {
+#[derive(Debug, Clone)]
+pub struct PieceHashes(pub Vec<[u8; 20]>);
+
+pub mod piece_hashes {
     use core::fmt;
     use serde::{de::{self, Visitor}, Deserialize, Deserializer, Serialize, Serializer};
+    use super::PieceHashes;
 
-    #[derive(Debug, Clone)]
-    pub struct Hashes(pub Vec<[u8; 20]>);
-    struct HashesVisitor;
-    
-    impl<'de> Visitor<'de> for HashesVisitor {
-        type Value = Hashes;
-    
+    struct PieceHashesVisitor;
+
+    impl<'de> Visitor<'de> for PieceHashesVisitor {
+        type Value = PieceHashes;
+
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
             formatter.write_str("a byte string whose length is a multiple of 20")
         }
-    
+
         fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
         where
             E: de::Error,
@@ -150,23 +179,23 @@ pub mod hashes {
                 return Err(E::custom(format!("length is {}", v.len())));
             }
     
-            Ok(Hashes(v
+            Ok(PieceHashes(v
                 .chunks_exact(20)
                 .map(|slice| slice.try_into().expect("guaranteed to be length 20"))
                 .collect()))
         }
     }
-    
-    impl<'de> Deserialize<'de> for Hashes {
-        fn deserialize<D>(deserializer: D) -> Result<Hashes, D::Error>
+
+    impl<'de> Deserialize<'de> for PieceHashes {
+        fn deserialize<D>(deserializer: D) -> Result<PieceHashes, D::Error>
         where
             D: Deserializer<'de>,
         {
-            deserializer.deserialize_bytes(HashesVisitor)
+            deserializer.deserialize_bytes(PieceHashesVisitor)
         }
     }
 
-    impl Serialize for Hashes {
+    impl Serialize for PieceHashes {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: Serializer,
